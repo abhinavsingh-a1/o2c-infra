@@ -5,19 +5,15 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        args: [--allow-multiple-documents]
+        exclude: ^helm/.*/templates/
       - id: check-added-large-files
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.0
     hooks:
       - id: gitleaks
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.0
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.109.2
     hooks:
-      - id: ruff
-        args: [--fix]
-      - id: ruff-format
-  - repo: https://github.com/sqlfluff/sqlfluff
-    rev: 4.4.0
-    hooks:
-      - id: sqlfluff-lint
-        args: [--dialect, postgres]
+      - id: terraform_fmt
+      - id: terraform_validate
