@@ -1,0 +1,6 @@
+apiVersion: v2
+name: o2c-service
+description: Shared chart for all O2C services
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
