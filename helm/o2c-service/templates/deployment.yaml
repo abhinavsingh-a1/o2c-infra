@@ -33,6 +33,11 @@ spec:
               port: {{ .Values.containerPort }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.secretName }}
+          envFrom:
+            - secretRef:
+                name: {{ . }}
+          {{- end }}
           {{- with .Values.env }}
           env:
             {{- range $key, $value := . }}
