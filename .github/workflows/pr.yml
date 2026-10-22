@@ -1,0 +1,89 @@
+# PR gates for o2c-infra (o2c-app ADR-015). Actions pinned to commit SHAs (version in
+# the comment, updated by Dependabot). Nothing is planned or applied here: plan and
+# apply run in the Jenkins Terraform pipeline with credentials (E14).
+name: PR
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TERRAFORM_VERSION: "1.15.6"
+  HELM_VERSION: "v4.3.1"
+  CHECKOV_VERSION: "3.3.30"
+
+jobs:
+  terraform:
+    name: terraform (fmt, validate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+      TF_IN_AUTOMATION: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive -diff terraform
+      - name: terraform validate (every root and module, no backend)
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          status=0
+          for dir in $(find terraform -name '*.tf' -printf '%h\n' | sort -u); do
+            echo "::group::$dir"
+            if terraform -chdir="$dir" init -backend=false -input=false -no-color \
+              && terraform -chdir="$dir" validate -no-color; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::terraform validate failed in $dir"
+              status=1
+            fi
+          done
+          exit "$status"
+
+  helm:
+    name: helm (lint, template)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: helm lint and template (every chart)
+        run: |
+          for chart in helm/*/; do
+            helm lint --strict "$chart"
+            helm template ci "$chart" --namespace o2c > /dev/null
+          done
+
+  checkov:
+    name: checkov (terraform, helm)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.1"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+      # Skips: inline next to each resource with a reason, plus .checkov.yaml
+      - run: uvx --from "checkov==$CHECKOV_VERSION" checkov --config-file .checkov.yaml -d .

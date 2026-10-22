@@ -14,3 +14,21 @@ resources:
     memory: 256Mi
 env: {}
 secretName: ""
+# Pod and container hardening (Checkov CKV_K8S_*). The images run as a numeric non-root
+# user (10001 for the Python services; the ui image runs as 101: override runAsUser).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true # writable /tmp below
+  capabilities:
+    drop: ["ALL"]
+# The services do not call the Kubernetes API
+automountServiceAccountToken: false
+# Writable scratch space (e.g. intake's PROMETHEUS_MULTIPROC_DIR under /tmp)
+tmpSizeLimit: 64Mi

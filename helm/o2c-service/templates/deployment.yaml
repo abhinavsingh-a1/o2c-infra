@@ -2,8 +2,14 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
   labels:
     app: {{ .Release.Name }}
+  annotations:
+    # Checkov skips with reasons (o2c-app ADR-015); everything else is enforced.
+    checkov.io/skip1: CKV_K8S_21=The namespace comes from the release (helm -n / ArgoCD), never hard-coded; rendering without one shows default
+    checkov.io/skip2: CKV_K8S_43=Images are promoted by immutable version tags in o2c-gitops (ECR tag immutability); digests come with signed images
+    checkov.io/skip3: CKV_K8S_15=With immutable tags IfNotPresent is correct; Always adds a registry call to every pod start
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
@@ -14,13 +20,15 @@ spec:
       labels:
         app: {{ .Release.Name }}
     spec:
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 10001
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: app
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
             - containerPort: {{ .Values.containerPort }}
           readinessProbe:
@@ -33,6 +41,9 @@ spec:
               port: {{ .Values.containerPort }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           {{- with .Values.secretName }}
           envFrom:
             - secretRef:
@@ -45,3 +56,7 @@ spec:
               value: {{ $value | quote }}
             {{- end }}
           {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.tmpSizeLimit }}
