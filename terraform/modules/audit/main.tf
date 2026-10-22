@@ -23,6 +23,11 @@ locals {
 # --- audit-logs bucket: CloudTrail and AWS Config ---
 
 resource "aws_s3_bucket" "logs" {
+  # checkov:skip=CKV_AWS_145:SSE-S3 instead of a KMS key: a CMK costs $1/month and its 7-30 day deletion window conflicts with destroyable environments
+  # checkov:skip=CKV_AWS_144:dev data is destroyable by design; production replicates the archive to a second region
+  # checkov:skip=CKV_AWS_18:no third bucket for access logs in dev; production records S3 data events in CloudTrail
+  # checkov:skip=CKV2_AWS_62:nothing consumes bucket events
+  # checkov:skip=CKV_AWS_21:files are written once and expire after 7 days; CloudTrail digest files prove integrity
   bucket        = local.logs_bucket
   force_destroy = true # destroyable with its log files
   tags          = var.tags
@@ -159,6 +164,9 @@ resource "aws_s3_bucket_policy" "logs" {
 # --- CloudTrail: management events of all regions ---
 
 resource "aws_cloudtrail" "this" {
+  # checkov:skip=CKV_AWS_35:SSE-S3 instead of a KMS key: a CMK costs $1/month and its 7-30 day deletion window conflicts with destroyable environments
+  # checkov:skip=CKV_AWS_252:no subscriber for delivery notifications
+  # checkov:skip=CKV2_AWS_10:no CloudWatch Logs in dev (cost); the trail is read from S3
   name                          = local.trail_name
   s3_bucket_name                = aws_s3_bucket.logs.id
   s3_key_prefix                 = local.trail_prefix
@@ -216,6 +224,7 @@ resource "aws_iam_role_policy" "config_delivery" {
 }
 
 resource "aws_config_configuration_recorder" "this" {
+  # checkov:skip=CKV2_AWS_48:deliberately 4 resource types: recording all types bills every ENI, volume and instance change of EKS
   name     = local.config_name
   role_arn = aws_iam_role.config.arn
 
@@ -250,6 +259,7 @@ resource "aws_config_delivery_channel" "this" {
 # (it depends on the channel), which stops the recorder before the channel and the
 # recorder are deleted.
 resource "aws_config_configuration_recorder_status" "this" {
+  # checkov:skip=CKV2_AWS_45:the recorder records 4 resource types on purpose (cost, see the recorder)
   name       = aws_config_configuration_recorder.this.name
   is_enabled = true
 
@@ -259,6 +269,10 @@ resource "aws_config_configuration_recorder_status" "this" {
 # --- audit-archive bucket: Object Lock for the decision archive ---
 
 resource "aws_s3_bucket" "archive" {
+  # checkov:skip=CKV_AWS_145:SSE-S3 instead of a KMS key: a CMK costs $1/month and its 7-30 day deletion window conflicts with destroyable environments
+  # checkov:skip=CKV_AWS_144:dev data is destroyable by design; production replicates the archive to a second region
+  # checkov:skip=CKV_AWS_18:no third bucket for access logs in dev; production records S3 data events in CloudTrail
+  # checkov:skip=CKV2_AWS_62:nothing consumes bucket events
   bucket              = "${var.name_prefix}-audit-archive-${local.account_id}"
   object_lock_enabled = true
   # Deletes all object versions on destroy. GOVERNANCE retention can be bypassed by a
@@ -281,6 +295,24 @@ resource "aws_s3_bucket_object_lock_configuration" "archive" {
     default_retention {
       mode = "GOVERNANCE"
       days = var.archive_retention_days
+    }
+  }
+
+  depends_on = [aws_s3_bucket_versioning.archive]
+}
+
+# Old versions (each append rewrites the day's object) expire once their lock has ended
+resource "aws_s3_bucket_lifecycle_configuration" "archive" {
+  bucket = aws_s3_bucket.archive.id
+  rule {
+    id     = "expire-old-versions"
+    status = "Enabled"
+    filter {}
+    noncurrent_version_expiration {
+      noncurrent_days = var.archive_retention_days + 1
+    }
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
     }
   }
 

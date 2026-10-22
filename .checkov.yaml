@@ -1,0 +1,13 @@
+# Checkov configuration for o2c-infra (o2c-app ADR-015). Per-resource skips live next to
+# the resource (Terraform comments, chart annotations); this file holds only skips that
+# cannot be expressed there, each with its reason. No framework-wide or path-wide skips.
+framework:
+  - terraform
+  - helm
+compact: true
+quiet: true
+skip-check:
+  # CKV2_K8S_6 "pods without a NetworkPolicy": a graph check that chart annotations
+  # cannot skip. A correct policy depends on the cluster's namespaces (monitoring,
+  # ingress), which come with the cluster (E14): default-deny plus per-service rules.
+  - CKV2_K8S_6

@@ -1,0 +1,21 @@
+# Weekly updates (o2c-app ADR-015); minor and patch updates grouped per ecosystem.
+version: 2
+
+updates:
+  - package-ecosystem: terraform
+    directories:
+      - "/terraform/envs/*"
+      - "/terraform/modules/*"
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
