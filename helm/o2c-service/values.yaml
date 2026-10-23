@@ -1,7 +1,13 @@
 image:
   repository: o2c-hello
   tag: "0.1.0"
+  # Set by the o2c-app release (o2c-gitops envs/*): the image is then repository@digest
+  # and the tag is ignored (o2c-app ADR-016). Must be sha256:<64 hex>.
+  digest: ""
   pullPolicy: IfNotPresent
+# Container command and args; the shared Python service image has no CMD
+command: []
+args: []
 replicaCount: 1
 containerPort: 8000
 healthPath: /health
