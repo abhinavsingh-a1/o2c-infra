@@ -1,0 +1,182 @@
+// Promote the release running in test to prod (o2c-app ADR-018).
+//
+//  1. the test images: signature and build provenance verified, one o2c-app commit
+//  2. change request: ServiceNow when SERVICENOW_URL is set (credential servicenow),
+//     otherwise recorded as "SKIPPED (E13 pending)"
+//  3. four-eyes approval: an input step that must be answered by a user other than the
+//     one who started the build (the build fails otherwise)
+//  4. a PR in o2c-gitops setting envs/prod to the test images with 1 replica, merged
+//     once its checks pass; Argo CD sync of the prod applications, wait until healthy
+//  5. smoke test (healthPath of every service) and SLO check (short k6 run: p95 < 800 ms,
+//     errors < 1%); SIMULATE_SLO_BREACH=true makes the SLO check fail on purpose
+//  6. rollback rule: when anything fails after the prod PR was merged, a revert PR is
+//     opened and merged and prod is synced back to the previous images
+//
+// Helpers: jenkins/lib.sh. Reports: archived artifacts under reports/.
+
+def bash(String label, String script) {
+  sh(label: label, script: "#!/bin/bash\nset -euo pipefail\nsource \"\$WORKSPACE/jenkins/lib.sh\"\n${script}")
+}
+
+def bashOut(String label, String script) {
+  sh(label: label, returnStdout: true,
+     script: "#!/bin/bash\nset -euo pipefail\nsource \"\$WORKSPACE/jenkins/lib.sh\"\n${script}").trim()
+}
+
+// "service repository@digest servicePort healthPath" per values file of envs/<env>
+def writeImages(String envName, String file) {
+  def lines = findFiles(glob: "gitops/envs/${envName}/*.yaml").collect { f ->
+    def v = readYaml(file: f.path)
+    "${f.name - '.yaml'} ${v.image.repository}@${v.image.digest} ${v.servicePort ?: 80} ${v.healthPath ?: '/health'}"
+  }
+  writeFile(file: file, text: lines.sort().join('\n') + '\n')
+}
+
+pipeline {
+  agent any
+  parameters {
+    booleanParam(name: 'SIMULATE_SLO_BREACH', defaultValue: false,
+                 description: 'Make the SLO check fail on purpose, to demonstrate the automatic rollback')
+  }
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    timeout(time: 6, unit: 'HOURS')  // includes up to 4 hours waiting for the approval
+    buildDiscarder(logRotator(numToKeepStr: '30'))
+    skipDefaultCheckout()
+  }
+  environment {
+    GH_TOKEN = credentials('github-token')
+    KUBECONFIG = credentials('kubeconfig-o2c')
+    UV_FROZEN = '1'
+  }
+  stages {
+    stage('Checkout') {
+      steps {
+        cleanWs()
+        checkout scm
+        bash('o2c-gitops main', 'mkdir -p "$REPORTS"; clone_gitops')
+      }
+    }
+    stage('Release in test') {
+      steps {
+        script {
+          writeImages('test', 'reports/images-test.txt')
+          env.PROMOTED_COMMIT = bashOut('verify the test images, find their o2c-app commit',
+                                        'release_commit "$REPORTS/images-test.txt"')
+          currentBuild.description = "o2c-app ${env.PROMOTED_COMMIT.take(12)}"
+          bash('o2c-app at the release', 'checkout_app "$PROMOTED_COMMIT"')
+        }
+      }
+    }
+    stage('Change request') {
+      steps {
+        script {
+          if (env.SERVICENOW_URL?.trim()) {
+            withCredentials([usernamePassword(credentialsId: 'servicenow',
+                                              usernameVariable: 'SN_USER', passwordVariable: 'SN_PASSWORD')]) {
+              env.CHANGE_REQUEST = bashOut('ServiceNow change request', 'servicenow_change "$PROMOTED_COMMIT"')
+            }
+          } else {
+            env.CHANGE_REQUEST = 'SKIPPED (E13 pending)'
+          }
+          writeFile(file: 'reports/change-request.txt', text: "${env.CHANGE_REQUEST}\n")
+          echo("Change request: ${env.CHANGE_REQUEST}")
+        }
+      }
+    }
+    stage('Approval (four eyes)') {
+      steps {
+        script {
+          def starter = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')
+                                    .collect { it.userId }.find { it }
+          if (!starter) {
+            error('promote-to-prod must be started by a user, so that another user can approve it')
+          }
+          def approver
+          timeout(time: 4, unit: 'HOURS') {
+            approver = input(id: 'ProdApproval', ok: 'Approve', submitterParameter: 'APPROVER',
+                             message: "Promote o2c-app ${env.PROMOTED_COMMIT.take(12)} to prod? " +
+                                      "Started by ${starter}: another user must approve " +
+                                      "(change request: ${env.CHANGE_REQUEST}).")
+          }
+          writeFile(file: 'reports/approval.txt',
+                    text: "o2c-app: ${env.PROMOTED_COMMIT}\nchange request: ${env.CHANGE_REQUEST}\n" +
+                          "started by: ${starter}\napproved by: ${approver}\n")
+          if (approver == starter) {
+            error("four-eyes rule: ${approver} started this build and cannot approve it")
+          }
+          echo("Approved by ${approver} (started by ${starter})")
+        }
+      }
+    }
+    stage('Promotion PR (prod)') {
+      steps {
+        script {
+          // Set only when a PR was merged: the rollback reverts exactly this commit
+          env.PROD_MERGE = bashOut('PR in o2c-gitops: envs/prod := envs/test, replicas 1',
+                                   'promote_pr test prod "$PROMOTED_COMMIT"')
+          echo(env.PROD_MERGE ? "o2c-gitops ${env.PROD_MERGE}" : 'envs/prod was up to date')
+        }
+      }
+    }
+    stage('Deploy to prod') {
+      steps {
+        bash('Argo CD sync and wait', '''
+          argocd_login
+          sync_env prod
+          assert_images prod "$REPORTS/images-test.txt"
+        ''')
+      }
+    }
+    stage('Smoke test') {
+      steps {
+        bash('healthPath of every prod service', '''
+          trap stop_port_forwards EXIT
+          smoke_test prod "$REPORTS/images-test.txt" | tee "$REPORTS/smoke-test.txt"
+        ''')
+      }
+    }
+    stage('SLO check') {
+      steps {
+        bash('k6: 10 VUs, 20 s, p95 < 800 ms, errors < 1%', '''
+          trap stop_port_forwards EXIT
+          p95=800
+          if [ "$SIMULATE_SLO_BREACH" = true ]; then
+            echo "SIMULATE_SLO_BREACH: p95 threshold 0 ms, the SLO check fails on purpose" >&2
+            p95=0
+          fi
+          port_forward o2c-prod intake 18200 80
+          port_forward o2c-prod ui 18080 80
+          k6_run prod-slo 10 20s "$p95" http://127.0.0.1:18200/health http://127.0.0.1:18080/
+        ''')
+      }
+    }
+  }
+  post {
+    // unsuccessful: failed or aborted. Runs before cleanup, after always.
+    unsuccessful {
+      script {
+        if (env.PROD_MERGE) {
+          echo("Rollback: reverting o2c-gitops ${env.PROD_MERGE}")
+          env.ROLLBACK_MERGE = bashOut('revert PR in o2c-gitops',
+            'revert_pr prod "$PROD_MERGE" "the promotion of o2c-app ${PROMOTED_COMMIT:0:12} failed after the merge"')
+          bash('pull o2c-gitops main', 'git -C "$WORKSPACE/gitops" switch --quiet main && git -C "$WORKSPACE/gitops" pull --quiet --ff-only')
+          writeImages('prod', 'reports/images-prod-rollback.txt')
+          bash('Argo CD sync prod back', '''
+            argocd_login
+            sync_env prod
+            assert_images prod "$REPORTS/images-prod-rollback.txt"
+          ''')
+          writeFile(file: 'reports/rollback.txt',
+                    text: "reverted o2c-gitops ${env.PROD_MERGE} with ${env.ROLLBACK_MERGE}\n")
+          echo("Rolled back: prod runs the images of o2c-gitops ${env.ROLLBACK_MERGE}")
+        }
+      }
+    }
+    cleanup {
+      archiveArtifacts(artifacts: 'reports/**', allowEmptyArchive: true, fingerprint: true)
+      cleanWs()
+    }
+  }
+}

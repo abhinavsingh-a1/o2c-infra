@@ -1,0 +1,5 @@
+# The runner container itself: every play drives the host's Docker through the socket
+all:
+  hosts:
+    localhost:
+      ansible_connection: local

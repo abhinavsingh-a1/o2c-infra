@@ -1,0 +1,10 @@
+# Jenkins for the promotion pipelines (o2c-app ADR-018) on the host's Docker, next to the
+# kind cluster "o2c". Idempotent: run it again after a change.
+#
+#   make jenkins-up      (scripts/ansible.sh jenkins.yml)
+#   make jenkins-down    (... -e jenkins_state=absent: removes the container, keeps the volume)
+- name: Jenkins (o2c-jenkins, http://localhost:18090)
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - jenkins
