@@ -1,0 +1,10 @@
+# Kyverno on the local kind cluster (o2c-app ADR-017): one replica per controller.
+# The policies themselves live in o2c-gitops platform/policies and are synced by Argo CD.
+admissionController:
+  replicas: 1
+backgroundController:
+  replicas: 1
+cleanupController:
+  replicas: 1
+reportsController:
+  replicas: 1

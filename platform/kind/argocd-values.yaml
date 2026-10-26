@@ -1,0 +1,29 @@
+# Argo CD on the local kind cluster (o2c-app ADR-017). Reached only through
+# argocd-ui.sh (port-forward), so no ingress; no SSO (dex) and no notifications.
+dex:
+  enabled: false
+notifications:
+  enabled: false
+configs:
+  params:
+    # TLS ends at the port-forward on localhost; the UI is served over plain HTTP
+    server.insecure: true
+  cm:
+    # Kyverno's reports change constantly and are not managed from Git: do not watch them
+    resource.exclusions: |
+      - apiGroups: ["reports.kyverno.io", "wgpolicyk8s.io"]
+        kinds: ["PolicyReport", "ClusterPolicyReport", "EphemeralReport", "ClusterEphemeralReport"]
+        clusters: ["*"]
+    # Health of child Applications (app of apps): without it, sync waves in the root
+    # Application do not wait for namespaces and policies before the services
+    resource.customizations.health.argoproj.io_Application: |
+      hs = {}
+      hs.status = "Progressing"
+      hs.message = ""
+      if obj.status ~= nil and obj.status.health ~= nil then
+        hs.status = obj.status.health.status
+        if obj.status.health.message ~= nil then
+          hs.message = obj.status.health.message
+        end
+      end
+      return hs
