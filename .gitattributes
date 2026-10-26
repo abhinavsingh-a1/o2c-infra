@@ -4,3 +4,21 @@
 ansible/** text eol=lf
 jenkins/** text eol=lf
 Makefile text eol=lf
+# Binary: never line-ending converted or diffed. After the text rules above, so these win
+# (the last matching line sets an attribute)
+*.pyc binary
+*.pyo binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tgz binary
+*.tar binary
+*.jar binary
+*.onnx binary
+*.bin binary

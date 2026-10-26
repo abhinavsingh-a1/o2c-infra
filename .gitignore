@@ -45,3 +45,7 @@ terraform.rc
 
 # Provider lock files belong to root modules (terraform/envs/*), not to reusable modules
 terraform/modules/**/.terraform.lock.hcl
+
+# Python bytecode (Ansible compiles the role's filter plugins when it loads them)
+__pycache__/
+*.pyc
