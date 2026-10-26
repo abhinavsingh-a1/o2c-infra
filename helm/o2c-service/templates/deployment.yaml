@@ -1,3 +1,4 @@
+{{- $o2cEnv := include "o2c-service.o2cEnv" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -39,6 +40,12 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
             - containerPort: {{ .Values.containerPort }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.healthPath }}
+              port: {{ .Values.containerPort }}
+            periodSeconds: 10
+            failureThreshold: {{ .Values.startupFailureThreshold }}
           readinessProbe:
             httpGet:
               path: {{ .Values.healthPath }}
@@ -52,14 +59,26 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- range $i, $file := .Values.secretFiles }}
+            - name: secret-file-{{ $i }}
+              mountPath: {{ $file.mountPath }}
+              readOnly: true
+            {{- end }}
           {{- with .Values.secretName }}
           envFrom:
             - secretRef:
                 name: {{ . }}
           {{- end }}
-          {{- with .Values.env }}
+          {{- if or $o2cEnv .Values.env }}
           env:
-            {{- range $key, $value := . }}
+            {{- with $o2cEnv }}
+            - name: O2C_ENV
+              value: {{ . | quote }}
+            {{- end }}
+            {{- range $key, $value := .Values.env }}
+            {{- if eq $key "O2C_ENV" }}
+            {{- fail "set the environment with o2cEnv, not env.O2C_ENV" }}
+            {{- end }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
@@ -68,3 +87,8 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: {{ .Values.tmpSizeLimit }}
+        {{- range $i, $file := .Values.secretFiles }}
+        - name: secret-file-{{ $i }}
+          secret:
+            secretName: {{ required "secretFiles[].secretName is required" $file.secretName }}
+        {{- end }}

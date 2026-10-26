@@ -10,7 +10,13 @@ command: []
 args: []
 replicaCount: 1
 containerPort: 8000
+# The Service's port. 80 by default; the agent keeps 8400 because the ui's nginx
+# proxies to agent:8400, as in Docker Compose.
+servicePort: 80
 healthPath: /health
+# Pods get up to startupFailureThreshold x 10 s to answer healthPath before the liveness
+# probe takes over (the classifier loads DistilBERT at start).
+startupFailureThreshold: 30
 resources:
   requests:
     cpu: 50m
@@ -18,8 +24,16 @@ resources:
   limits:
     cpu: 250m
     memory: 256Mi
+# Environment of the service (o2c-app ADR-017): rendered as O2C_ENV, which prefixes
+# Kafka topics and consumer groups (dev.docs.received). Empty: no prefix.
+o2cEnv: ""
+# Plain settings (name: value). Credentials never go here: see secretName.
 env: {}
+# Secret whose keys become environment variables (credentials; created outside Git,
+# e.g. o2c-infra platform/kind/secrets.sh)
 secretName: ""
+# Secrets mounted as read-only files: [{secretName: agent-users, mountPath: /app/local}]
+secretFiles: []
 # Pod and container hardening (Checkov CKV_K8S_*). The images run as a numeric non-root
 # user (10001 for the Python services; the ui image runs as 101: override runAsUser).
 podSecurityContext:
@@ -30,8 +44,11 @@ podSecurityContext:
   seccompProfile:
     type: RuntimeDefault
 securityContext:
+  runAsNonRoot: true
   allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true # writable /tmp below
+  # Every O2C image runs with a read-only root filesystem and writes only to /tmp
+  # (emptyDir below). A service that cannot would set this to false in its values.
+  readOnlyRootFilesystem: true
   capabilities:
     drop: ["ALL"]
 # The services do not call the Kubernetes API
