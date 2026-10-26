@@ -32,6 +32,17 @@
         _set: "{{ _env | dict2items | selectattr('value') | map(attribute='key') }}"
         _missing: "{{ jenkins_secret_keys | difference(_set) }}"
 
+    # A quote left on a value goes into /run/secrets as is (GitHub: 401 Bad credentials)
+    - name: The Jenkins secrets have no surrounding quotes left
+      ansible.builtin.assert:
+        that: _quoted | length == 0
+        fail_msg: "quote at the start or end in o2c-app/.env: {{ _quoted | join(', ') }}"
+        quiet: true
+      vars:
+        _quoted: >-
+          {{ _env | dict2items | selectattr('key', 'in', jenkins_secret_keys)
+             | selectattr('value', 'search', '^[\'"]|[\'"]$') | map(attribute='key') }}
+
     - name: kubeconfig of the kind cluster for containers on its network (--internal)
       ansible.builtin.command: kind get kubeconfig --internal --name {{ jenkins_kind_cluster }}
       register: _kubeconfig
