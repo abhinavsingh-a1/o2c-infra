@@ -1,0 +1,21 @@
+# present: build the image if its context changed, (re)create and start Jenkins.
+# absent: remove the container; the volume (jobs, builds, audit log) stays.
+jenkins_state: present
+
+jenkins_container: o2c-jenkins
+jenkins_volume: o2c-jenkins-home  # JENKINS_HOME: builds, workspaces, audit-trail.log
+jenkins_image: o2c-jenkins  # tagged with a hash of files/image (a change builds anew)
+jenkins_port: 18090  # on 127.0.0.1 only (8080 is taken on this host)
+jenkins_network: kind  # reaches the API server as o2c-control-plane:6443
+jenkins_kind_cluster: o2c
+jenkins_url: "http://{{ jenkins_container }}:8080"  # from the runner (also on {{ jenkins_network }})
+jenkins_wait_seconds: 300
+
+# o2c-app/.env as the runner sees it (scripts/ansible.sh mounts the repos' parent at /work)
+jenkins_env_file: /work/o2c-app/.env
+jenkins_admin_user: abhinav
+# Read from jenkins_env_file; never logged
+jenkins_secret_keys:
+  - JENKINS_ADMIN_PASSWORD
+  - JENKINS_APPROVER_PASSWORD
+  - JENKINS_GITHUB_TOKEN

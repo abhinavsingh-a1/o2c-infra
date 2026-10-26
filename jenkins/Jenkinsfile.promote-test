@@ -1,0 +1,149 @@
+// Promote the release running in dev to test (o2c-app ADR-018).
+//
+//  1. the dev images: cosign signature and build provenance of o2c-app's release workflow
+//     on main, all from one o2c-app commit (the promoted commit)
+//  2. a PR in o2c-gitops setting envs/test to the dev images with 1 replica, merged once
+//     its checks pass
+//  3. Argo CD sync of the test applications (manual sync policy), wait until healthy
+//  4. gates: integration test (a training PO through the test pipeline), OWASP ZAP
+//     baseline (no high alerts), k6 load test (p95 < 500 ms, errors < 1%), make eval of
+//     o2c-app at the promoted commit
+//  5. always: archive the reports, scale o2c-test to 0 (memory), clean the workspace
+//
+// Helpers: jenkins/lib.sh. Reports: archived artifacts under reports/ and eval/.
+
+def bash(String label, String script) {
+  sh(label: label, script: "#!/bin/bash\nset -euo pipefail\nsource \"\$WORKSPACE/jenkins/lib.sh\"\n${script}")
+}
+
+def bashOut(String label, String script) {
+  sh(label: label, returnStdout: true,
+     script: "#!/bin/bash\nset -euo pipefail\nsource \"\$WORKSPACE/jenkins/lib.sh\"\n${script}").trim()
+}
+
+// "service repository@digest servicePort healthPath" per values file of envs/<env>
+def writeImages(String envName) {
+  def lines = findFiles(glob: "gitops/envs/${envName}/*.yaml").collect { f ->
+    def v = readYaml(file: f.path)
+    "${f.name - '.yaml'} ${v.image.repository}@${v.image.digest} ${v.servicePort ?: 80} ${v.healthPath ?: '/health'}"
+  }
+  writeFile(file: "reports/images-${envName}.txt", text: lines.sort().join('\n') + '\n')
+}
+
+pipeline {
+  agent any
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    timeout(time: 3, unit: 'HOURS')
+    buildDiscarder(logRotator(numToKeepStr: '30'))
+    skipDefaultCheckout()
+  }
+  environment {
+    GH_TOKEN = credentials('github-token')
+    KUBECONFIG = credentials('kubeconfig-o2c')
+    O2C_ENV_FILE = credentials('o2c-env')
+    UV_FROZEN = '1'
+  }
+  stages {
+    stage('Checkout') {
+      steps {
+        cleanWs()
+        checkout scm
+        bash('o2c-gitops main', 'mkdir -p "$REPORTS"; clone_gitops')
+      }
+    }
+    stage('Release in dev') {
+      steps {
+        script {
+          writeImages('dev')
+          env.PROMOTED_COMMIT = bashOut('verify the dev images, find their o2c-app commit',
+                                        'release_commit "$REPORTS/images-dev.txt"')
+          currentBuild.description = "o2c-app ${env.PROMOTED_COMMIT.take(12)}"
+        }
+      }
+    }
+    stage('o2c-app at the release') {
+      steps {
+        bash('checkout and uv sync', '''
+          checkout_app "$PROMOTED_COMMIT"
+          write_app_env "$O2C_ENV_FILE" "$WORKSPACE/o2c-app/.env"
+          cd "$WORKSPACE/o2c-app" && uv sync --all-packages --group ml
+        ''')
+      }
+    }
+    stage('Promotion PR (test)') {
+      steps {
+        script {
+          env.GITOPS_MERGE = bashOut('PR in o2c-gitops: envs/test := envs/dev, replicas 1',
+                                     'promote_pr dev test "$PROMOTED_COMMIT"')
+          echo(env.GITOPS_MERGE ? "o2c-gitops ${env.GITOPS_MERGE}" : 'envs/test was up to date')
+        }
+      }
+    }
+    stage('Deploy to test') {
+      steps {
+        bash('Argo CD sync and wait', '''
+          argocd_login
+          sync_env test
+          assert_images test "$REPORTS/images-dev.txt"
+        ''')
+      }
+    }
+    stage('Integration test') {
+      steps {
+        bash('a training PO through o2c-test', '''
+          trap stop_port_forwards EXIT
+          port_forward o2c-test intake 18200 80
+          port_forward o2c-test agent 18400 8400
+          cd "$WORKSPACE/o2c-app"
+          uv run --all-packages python scripts/e2e_send_and_check.py order \
+            --intake-url http://127.0.0.1:18200/intake \
+            --metrics-url http://127.0.0.1:18400/metrics \
+            --pdf ml/data/train/pos/PO-0001.pdf --run-id "$BUILD_TAG" --timeout 600 \
+            | tee "$REPORTS/integration-test.txt"
+        ''')
+      }
+    }
+    stage('OWASP ZAP baseline') {
+      steps {
+        bash('ZAP: ui and agent API', '''
+          trap stop_port_forwards EXIT
+          port_forward o2c-test ui 18080 80
+          port_forward o2c-test agent 18400 8400
+          zap_baseline ui http://127.0.0.1:18080/
+          zap_baseline agent-api http://127.0.0.1:18400/docs
+        ''')
+      }
+    }
+    stage('k6 load test') {
+      steps {
+        bash('k6: 20 VUs, 30 s, p95 < 500 ms, errors < 1%', '''
+          trap stop_port_forwards EXIT
+          port_forward o2c-test intake 18200 80
+          port_forward o2c-test ui 18080 80
+          k6_run test 20 30s 500 http://127.0.0.1:18200/health http://127.0.0.1:18080/
+        ''')
+      }
+    }
+    stage('Evaluation (make eval)') {
+      steps {
+        bash('o2c-app make eval at the promoted commit', 'cd "$WORKSPACE/o2c-app" && make eval')
+      }
+    }
+  }
+  post {
+    always {
+      // Plain sh: runs even when the checkout (and with it jenkins/lib.sh) failed
+      sh(label: 'scale o2c-test to 0', script: '''
+        kubectl -n o2c-test scale deployment --all --replicas=0 \
+          || echo "WARNING: could not scale o2c-test to 0" >&2
+      ''')
+    }
+    cleanup {
+      archiveArtifacts(artifacts: 'reports/**, o2c-app/eval/report.md, o2c-app/eval/report.json',
+                       allowEmptyArchive: true, fingerprint: true)
+      cleanWs()
+    }
+  }
+}

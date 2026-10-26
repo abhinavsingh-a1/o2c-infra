@@ -43,11 +43,6 @@ need() {
   done
 }
 
-# postgresql+psycopg://u:p@localhost:5432/db -> ...@host.docker.internal:5432/db
-to_host() {
-  sed -E 's#@(localhost|127\.0\.0\.1|postgres)([:/])#@host.docker.internal\2#; s#//(localhost|127\.0\.0\.1|s3|kafka|litellm|mlflow)([:/])#//host.docker.internal\2#' <<< "$1"
-}
-
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 chmod 700 "$TMP"

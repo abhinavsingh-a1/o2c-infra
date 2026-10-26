@@ -1,2 +1,6 @@
 # Shell scripts run in bash (Git Bash, Linux): always LF
 *.sh text eol=lf
+# Built into the Jenkins image and run by Jenkins on Linux: always LF
+ansible/** text eol=lf
+jenkins/** text eol=lf
+Makefile text eol=lf

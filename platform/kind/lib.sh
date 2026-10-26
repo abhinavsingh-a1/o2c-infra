@@ -20,6 +20,14 @@ ENVIRONMENTS=(dev test prod)
 k() { kubectl --context "$CONTEXT" "$@"; }
 h() { helm --kube-context "$CONTEXT" "$@"; }
 
+# A value of o2c-app/.env as containers see the Compose stack on the host (Docker
+# Desktop): localhost, 127.0.0.1 and the Compose service names in URLs become
+# host.docker.internal. Used by secrets.sh (pods) and jenkins/lib.sh (pipelines).
+# postgresql+psycopg://u:p@localhost:5432/db -> ...@host.docker.internal:5432/db
+to_host() {
+  sed -E 's#@(localhost|127\.0\.0\.1|postgres)([:/])#@host.docker.internal\2#; s#//(localhost|127\.0\.0\.1|s3|kafka|litellm|mlflow)([:/])#//host.docker.internal\2#' <<< "$1"
+}
+
 require_cluster() {
   if ! kind get clusters 2> /dev/null | grep -qx "$CLUSTER"; then
     echo "kind cluster '$CLUSTER' not found: run make cluster-up in o2c-app" >&2

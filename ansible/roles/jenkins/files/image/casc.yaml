@@ -1,0 +1,143 @@
+# Jenkins configuration as code (o2c-app ADR-018). Applied at every start: changes made
+# in the UI are lost on restart. ${NAME} reads the file /run/secrets/NAME, copied into the
+# container by the Ansible role from o2c-app/.env and kind; no secret is in this file.
+jenkins:
+  systemMessage: >-
+    O2C promotion pipelines (o2c-app ADR-018). Configured as code in o2c-infra
+    (ansible/roles/jenkins): changes made here are lost on restart.
+  numExecutors: 2
+  mode: NORMAL
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: abhinav
+          name: Abhinav
+          password: "${JENKINS_ADMIN_PASSWORD}"
+        - id: approver
+          name: Approver
+          password: "${JENKINS_APPROVER_PASSWORD}"
+  # abhinav administers; approver may only see the jobs, start builds and answer the
+  # prod approval (input steps need Job/Build). Anonymous users get nothing.
+  authorizationStrategy:
+    globalMatrix:
+      entries:
+        - user:
+            name: abhinav
+            permissions:
+              - Overall/Administer
+        - user:
+            name: approver
+            permissions:
+              - Overall/Read
+              - Job/Read
+              - Job/Build
+
+security:
+  # The seed jobs below are the only Job DSL scripts, and they come from this file
+  globalJobDslSecurityConfiguration:
+    useScriptSecurity: false
+
+unclassified:
+  location:
+    url: http://localhost:18090/
+  # Who did what, in the volume: logins, configuration changes, builds with their cause
+  # and the answers to input steps (the prod approval)
+  audit-trail:
+    logBuildCause: true
+    pattern: ".*/(?:configSubmit|doDelete|postBuildResult|enable|disable|cancelQueue|stop|toggleLogKeep|doWipeOutWorkspace|createItem|createView|toggleOffline|cancelQuietDown|quietDown|restart|exit|safeExit|build|buildWithParameters|proceedEmpty|submit|abort)/?.*"
+    loggers:
+      - logFile:
+          log: /var/jenkins_home/audit-trail.log  # written as audit-trail.log.0, .1, ...
+          limit: 10
+          count: 5
+          logSeparator: ";"
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - string:
+              scope: GLOBAL
+              id: github-token
+              description: GitHub token (o2c-gitops PRs, attestation checks)
+              secret: "${JENKINS_GITHUB_TOKEN}"
+          - file:
+              scope: GLOBAL
+              id: kubeconfig-o2c
+              description: kind cluster o2c (kind get kubeconfig --internal)
+              fileName: kubeconfig
+              secretBytes: "${readFileBase64:/run/secrets/kubeconfig}"
+          - file:
+              scope: GLOBAL
+              id: o2c-env
+              description: o2c-app/.env without the JENKINS_* keys (eval, integration test)
+              fileName: o2c.env
+              secretBytes: "${readFileBase64:/run/secrets/o2c.env}"
+
+# Seed jobs: the pipelines are read from o2c-infra main (jenkins/Jenkinsfile.promote-*)
+jobs:
+  - script: |
+      def repo = 'https://github.com/abhinavsingh-a1/o2c-infra.git'
+      pipelineJob('promote-to-test') {
+        description('Promote the release running in dev to test: PR, sync, integration test, ' +
+                    'ZAP, k6, eval (o2c-app ADR-018)')
+        properties {
+          disableConcurrentBuilds()
+          buildDiscarder {
+            strategy {
+              logRotator {
+                numToKeepStr('30')
+                daysToKeepStr('')
+                artifactNumToKeepStr('')
+                artifactDaysToKeepStr('')
+              }
+            }
+          }
+        }
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote { url(repo) }
+                branch('*/main')
+              }
+            }
+            scriptPath('jenkins/Jenkinsfile.promote-test')
+            lightweight(true)
+          }
+        }
+      }
+      pipelineJob('promote-to-prod') {
+        description('Promote the release running in test to prod: change request, four-eyes ' +
+                    'approval, PR, sync, smoke test, SLO check, automatic rollback (o2c-app ADR-018)')
+        properties {
+          disableConcurrentBuilds()
+          buildDiscarder {
+            strategy {
+              logRotator {
+                numToKeepStr('30')
+                daysToKeepStr('')
+                artifactNumToKeepStr('')
+                artifactDaysToKeepStr('')
+              }
+            }
+          }
+        }
+        parameters {
+          booleanParam('SIMULATE_SLO_BREACH', false,
+                       'Make the SLO check fail on purpose, to demonstrate the automatic rollback')
+        }
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote { url(repo) }
+                branch('*/main')
+              }
+            }
+            scriptPath('jenkins/Jenkinsfile.promote-prod')
+            lightweight(true)
+          }
+        }
+      }

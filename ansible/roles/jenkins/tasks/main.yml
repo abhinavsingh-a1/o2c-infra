@@ -1,0 +1,163 @@
+# Jenkins for the promotion pipelines (o2c-app ADR-018). Every step converges: a second
+# run with nothing changed reports no changes.
+- name: Remove the Jenkins container (the volume stays)
+  when: jenkins_state == "absent"
+  community.docker.docker_container:
+    name: "{{ jenkins_container }}"
+    state: absent
+
+- name: Jenkins
+  when: jenkins_state == "present"
+  block:
+    # --- secrets: o2c-app/.env and the kind cluster; values never reach the output ---
+    - name: Read o2c-app/.env
+      ansible.builtin.slurp:
+        src: "{{ jenkins_env_file }}"
+      register: _env_file
+      no_log: true
+
+    - name: Parse o2c-app/.env
+      ansible.builtin.set_fact:
+        _env: "{{ _env_file.content | b64decode | dotenv }}"
+        # For the pipelines (credential o2c-env): everything but Jenkins's own secrets
+        _o2c_env: "{{ _env_file.content | b64decode | dotenv_without('JENKINS_') }}"
+      no_log: true
+
+    - name: The Jenkins secrets are set in o2c-app/.env
+      ansible.builtin.assert:
+        that: _missing | length == 0
+        fail_msg: "missing or empty in o2c-app/.env: {{ _missing | join(', ') }}"
+        quiet: true
+      vars:
+        _set: "{{ _env | dict2items | selectattr('value') | map(attribute='key') }}"
+        _missing: "{{ jenkins_secret_keys | difference(_set) }}"
+
+    - name: kubeconfig of the kind cluster for containers on its network (--internal)
+      ansible.builtin.command: kind get kubeconfig --internal --name {{ jenkins_kind_cluster }}
+      register: _kubeconfig
+      changed_when: false
+      no_log: true
+
+    - name: Group of the Docker socket (Jenkins runs docker as uid 1000)
+      ansible.builtin.stat:
+        path: /var/run/docker.sock
+        get_checksum: false
+      register: _docker_sock
+
+    # --- image: tagged with a hash of its build context, built only when that changed ---
+    - name: Files of the image build context
+      ansible.builtin.find:
+        paths: "{{ role_path }}/files/image"
+        recurse: true
+      register: _image_files
+
+    - name: Checksums of the build context
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop: "{{ _image_files.files | map(attribute='path') | sort }}"
+      loop_control:
+        label: "{{ item | basename }}"
+      register: _image_stats
+
+    - name: Image tag
+      ansible.builtin.set_fact:
+        _image_tag: "{{ (_image_stats.results | map(attribute='stat.checksum') | join(' ') | hash('sha256'))[:12] }}"
+
+    - name: Jenkins image {{ jenkins_image }}:{{ _image_tag }}
+      community.docker.docker_image_build:
+        name: "{{ jenkins_image }}"
+        tag: "{{ _image_tag }}"
+        path: "{{ role_path }}/files/image"
+        rebuild: never  # the tag names the context: an existing tag is up to date
+
+    - name: Volume {{ jenkins_volume }} (JENKINS_HOME)
+      community.docker.docker_volume:
+        name: "{{ jenkins_volume }}"
+
+    # --- container: created, secrets copied in, then started (JCasC reads them at start) ---
+    - name: Container {{ jenkins_container }}
+      community.docker.docker_container:
+        name: "{{ jenkins_container }}"
+        image: "{{ jenkins_image }}:{{ _image_tag }}"
+        state: present
+        restart_policy: unless-stopped
+        published_ports:
+          - "127.0.0.1:{{ jenkins_port }}:8080"
+        network_mode: "{{ jenkins_network }}"
+        networks:
+          - name: "{{ jenkins_network }}"
+        volumes:
+          - "{{ jenkins_volume }}:/var/jenkins_home"
+          - /var/run/docker.sock:/var/run/docker.sock
+        groups:
+          - "{{ _docker_sock.stat.gid | string }}"
+        env:
+          # The pipelines run ZAP and k6 in this container's network namespace and mount
+          # their workspace from this volume (jenkins/lib.sh)
+          JENKINS_CONTAINER: "{{ jenkins_container }}"
+          JENKINS_HOME_VOLUME: "{{ jenkins_volume }}"
+      register: _container
+
+    - name: Secrets for JCasC in /run/secrets (${NAME} in casc.yaml reads the file NAME)
+      community.docker.docker_container_copy_into:
+        container: "{{ jenkins_container }}"
+        container_path: "/run/secrets/{{ item.name }}"
+        content: "{{ item.content }}"
+        owner_id: 1000
+        group_id: 1000
+        mode: 0400
+      loop:
+        - name: JENKINS_ADMIN_PASSWORD
+          content: "{{ _env.JENKINS_ADMIN_PASSWORD }}"
+        - name: JENKINS_APPROVER_PASSWORD
+          content: "{{ _env.JENKINS_APPROVER_PASSWORD }}"
+        - name: JENKINS_GITHUB_TOKEN
+          content: "{{ _env.JENKINS_GITHUB_TOKEN }}"
+        - name: kubeconfig
+          content: "{{ _kubeconfig.stdout }}\n"
+        - name: o2c.env
+          content: "{{ _o2c_env }}"
+      register: _secrets
+      no_log: true
+
+    - name: Jenkins started (restarted when only its secrets changed)
+      community.docker.docker_container:
+        name: "{{ jenkins_container }}"
+        state: started
+        restart: "{{ _secrets is changed and _container is not changed }}"
+
+    - name: Wait until Jenkins answers
+      ansible.builtin.uri:
+        url: "{{ jenkins_url }}/login"
+        status_code: 200
+      register: _login
+      until: _login.status == 200
+      retries: "{{ (jenkins_wait_seconds | int / 5) | int }}"
+      delay: 5
+
+    - name: Log in as {{ jenkins_admin_user }} (JCasC applied)
+      ansible.builtin.uri:
+        url: "{{ jenkins_url }}/whoAmI/api/json"
+        user: "{{ jenkins_admin_user }}"
+        password: "{{ _env.JENKINS_ADMIN_PASSWORD }}"
+        force_basic_auth: true
+        status_code: [200, 401]
+      register: _whoami
+      no_log: true
+
+    - name: The admin is authenticated
+      ansible.builtin.assert:
+        that:
+          - _whoami.status == 200
+          - _whoami.json.name == jenkins_admin_user
+        fail_msg: >-
+          Jenkins answered {{ _whoami.status }} for {{ jenkins_admin_user }}: check the JCasC
+          log (docker logs {{ jenkins_container }})
+        quiet: true
+
+    - name: Jenkins is up
+      ansible.builtin.debug:
+        msg: >-
+          Jenkins: http://localhost:{{ jenkins_port }} - users {{ jenkins_admin_user }}
+          (admin) and approver; passwords in o2c-app/.env (docs/jenkins.md)

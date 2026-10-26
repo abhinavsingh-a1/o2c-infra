@@ -1,0 +1,9 @@
+# gitleaks configuration: default rules, plus one documented exception.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Jenkins plugin list: 'plugin-name-api:version' lines look like API keys to the generic rule but are public plugin versions"
+paths = [
+  '''ansible/roles/jenkins/files/image/plugins\.txt''',
+]
