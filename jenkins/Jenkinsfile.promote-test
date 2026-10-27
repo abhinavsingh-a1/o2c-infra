@@ -1,7 +1,7 @@
 // Promote the release running in dev to test (o2c-app ADR-018).
 //
 //  1. the dev images: cosign signature and build provenance of o2c-app's release workflow
-//     on main, all from one o2c-app commit (the promoted commit)
+//     on main; the promoted commit is the newest o2c-app commit they all have a provenance for
 //  2. a PR in o2c-gitops setting envs/test to the dev images with 1 replica, merged once
 //     its checks pass
 //  3. Argo CD sync of the test applications (manual sync policy), wait until healthy

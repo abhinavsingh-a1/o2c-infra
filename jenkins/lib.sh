@@ -38,30 +38,65 @@ clone_gitops() {
   git clone --quiet --depth 50 "https://github.com/$GITOPS_REPO.git" "$WORKSPACE/gitops"
 }
 
+# common_commit: stdin lines "service commit epoch", one per verified provenance
+# attestation (an image unchanged across releases keeps its digest and has one per
+# release commit). Prints the newest commit (latest attestation) that every service has;
+# without one, prints each service's commits and fails. Tested by jenkins/tests/common_commit.sh.
+common_commit() {
+  local out
+  if out=$(awk '
+      NF < 2 { next }
+      !seen[$1, $2]++ {
+        if (!($1 in commits)) order[++services] = $1
+        commits[$1] = commits[$1] " " substr($2, 1, 12)
+        has[$2]++
+      }
+      $3 + 0 > newest[$2] + 0 { newest[$2] = $3 }
+      END {
+        for (c in has)
+          if (has[c] == services && (best == "" || newest[c] + 0 > newest[best] + 0 \
+              || (newest[c] + 0 == newest[best] + 0 && c > best))) best = c
+        if (best != "") { print best; exit 0 }
+        for (i = 1; i <= services; i++) printf "  %s:%s\n", order[i], commits[order[i]]
+        exit 1
+      }'); then
+    [ -n "$out" ] || fail "no verified provenance to find an o2c-app commit in" || return 1
+    echo "$out"
+  else
+    fail "the images have no o2c-app commit in common; o2c-app commits of each image's build provenance:
+$out"
+  fi
+}
+
 # release_commit <images file>: verifies every image (lines "service repository@digest
 # ...") - cosign signature and SLSA provenance of the release workflow on main - and
-# prints the one o2c-app commit they were all built from.
+# prints the newest o2c-app commit that all of them have a verified provenance for.
 release_commit() {
-  local service image rest commit commits=()
+  local service image rest attested=() lines commit
   while read -r service image rest; do
     [ -n "$service" ] || continue
     cosign verify "$image" \
       --certificate-identity "https://github.com/$APP_REPO/$RELEASE_WORKFLOW@$RELEASE_REF" \
       --certificate-oidc-issuer "$OIDC_ISSUER" > /dev/null 2>&1 \
       || fail "$service: no valid signature of $RELEASE_WORKFLOW on main for $image" || return 1
-    commit=$(gh attestation verify "oci://$image" --repo "$APP_REPO" \
+    # Every verified attestation: "commit epoch" (the epoch of its latest verified timestamp)
+    lines=$(gh attestation verify "oci://$image" --repo "$APP_REPO" \
       --signer-workflow "$APP_REPO/$RELEASE_WORKFLOW" --source-ref "$RELEASE_REF" \
       --deny-self-hosted-runners --predicate-type "$PROVENANCE" --format json \
-      | jq -er '.[0].verificationResult.signature.certificate.sourceRepositoryDigest') \
+      | jq -er '.[].verificationResult
+          | "\(.signature.certificate.sourceRepositoryDigest | select(test("^[0-9a-f]{40}$"))) \(
+              [.verifiedTimestamps[]?.timestamp
+                | try (sub("\\.[0-9]+"; "") | fromdateiso8601) catch 0] | max // 0)"') \
       || fail "$service: no valid build provenance for $image" || return 1
-    log "verified $service $image (o2c-app $commit)"
-    commits+=("$commit")
+    log "verified $service $image (o2c-app $(cut -c1-12 <<< "$lines" | paste -sd ' '))"
+    while read -r commit rest; do
+      attested+=("$service $commit $rest")
+    done <<< "$lines"
   done < "$1"
-  [ "${#commits[@]}" -gt 0 ] || fail "no images in $1" || return 1
-  mapfile -t commits < <(printf '%s\n' "${commits[@]}" | sort -u)
-  [ "${#commits[@]}" -eq 1 ] \
-    || fail "the images come from different o2c-app commits: ${commits[*]}" || return 1
-  echo "${commits[0]}"
+  [ "${#attested[@]}" -gt 0 ] || fail "no images in $1" || return 1
+  commit=$(printf '%s\n' "${attested[@]}" | common_commit) || return 1
+  log "promoted o2c-app commit: $commit (common to all images)"
+  echo "$commit"
 }
 
 # checkout_app <commit>: o2c-app at the promoted commit in o2c-app/
