@@ -20,6 +20,18 @@ YAMLLINT_VERSION="1.38.0" # the same as o2c-gitops's PR check
 ZAP_IMAGE="zaproxy/zap-stable:2.17.0@sha256:030d3df57735dacbb83464854758e674dd9ad01d79d12a129a8e58b1fd384238"
 K6_IMAGE="grafana/k6:1.8.2@sha256:00fdcebafbc86cb0137d429529b1caa401a02e09025f02fc74866fa6e2b004d8"
 REPORTS="$WORKSPACE/reports"
+# The host settings of o2c-app (make eval: ml/eval_gate.py --full and the services' settings
+# it imports) as the Jenkins container reaches the Compose stack on the host. Kafka: 29092,
+# the listener that advertises host.docker.internal (9092 advertises localhost).
+APP_HOSTS=(
+  LITELLM_BASE_URL=http://host.docker.internal:4000
+  MLFLOW_TRACKING_URI=http://host.docker.internal:5000
+  MLFLOW_S3_ENDPOINT_URL=http://host.docker.internal:8333
+  LANGFUSE_HOST=http://host.docker.internal:3000
+  ERP_BASE_URL=http://host.docker.internal:8100
+  S3_ENDPOINT_URL=http://host.docker.internal:8333
+  KAFKA_BOOTSTRAP=host.docker.internal:29092
+)
 GIT_AUTHOR=(-c user.name="o2c-jenkins" -c user.email="o2c-jenkins@users.noreply.github.com")
 
 log() { echo "$*" >&2; }
@@ -127,14 +139,44 @@ write_app_env() {
         fi
       done < "$1"
       echo "# Jenkins: the Compose stack on the host (later lines win)"
-      echo "LITELLM_BASE_URL=http://host.docker.internal:4000"
-      echo "MLFLOW_TRACKING_URI=http://host.docker.internal:5000"
-      echo "LANGFUSE_HOST=http://host.docker.internal:3000"
-      echo "ERP_BASE_URL=http://host.docker.internal:8100"
-      echo "S3_ENDPOINT_URL=http://host.docker.internal:8333"
-      echo "MLFLOW_S3_ENDPOINT_URL=http://host.docker.internal:8333"
+      printf '%s\n' "${APP_HOSTS[@]}"
     } > "$2"
   )
+}
+
+# env_value <.env> <name>: the value of the last <name>= line, without surrounding quotes;
+# returns 1 if there is none
+env_value() {
+  local line value="" found=1
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] \
+      && [ "${BASH_REMATCH[2]}" = "$2" ]; then
+      value="${BASH_REMATCH[3]}"
+      found=0
+    fi
+  done < "$1"
+  if [[ "$value" =~ ^\'(.*)\'$ || "$value" =~ ^\"(.*)\"$ ]]; then
+    value="${BASH_REMATCH[1]}"
+  fi
+  printf '%s' "$value"
+  return "$found"
+}
+
+# export_app_hosts <o2c-app .env>: exports APP_HOSTS and the database URLs of the .env
+# (its credentials, host host.docker.internal). Needed by make eval: some settings are
+# read from the process environment only, not from .env (MLFLOW_TRACKING_URI in
+# ml/eval_hybrid.py and agent/anomaly.py). Prints nothing.
+export_app_hosts() {
+  local setting name url
+  for setting in "${APP_HOSTS[@]}"; do
+    export "${setting?}"
+  done
+  for name in EVENTS_DATABASE_URL ERP_DATABASE_URL; do
+    if url=$(env_value "$1" "$name"); then
+      export "$name=$(to_host "$url")"
+    fi
+  done
 }
 
 # open_and_merge_pr <branch> <title> <body>: push the branch of gitops/ (with its commit),

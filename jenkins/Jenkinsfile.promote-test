@@ -132,7 +132,11 @@ pipeline {
     }
     stage('Evaluation (make eval)') {
       steps {
-        bash('o2c-app make eval at the promoted commit', 'cd "$WORKSPACE/o2c-app" && make eval')
+        // The host settings exported too: MLflow is read from the environment only
+        bash('o2c-app make eval at the promoted commit', '''
+          export_app_hosts "$O2C_ENV_FILE"
+          cd "$WORKSPACE/o2c-app" && make eval
+        ''')
       }
     }
   }
