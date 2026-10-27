@@ -58,7 +58,9 @@ Start **promote-to-test** with **Build Now**. The pipeline:
 3. syncs the test applications in Argo CD and waits until they are healthy;
 4. runs the gates. Any failure fails the build:
    - the integration test;
-   - the OWASP ZAP baseline;
+   - the OWASP ZAP baseline of the ui and the agent API: any high-risk alert, and any
+     alert of a FAIL rule in `jenkins/zap-baseline.conf` (the security headers, vulnerable
+     or cross-domain scripts); informational rules stay WARN;
    - the k6 load test;
    - `make eval`.
 5. scales `o2c-test` back to 0, whatever happened.
@@ -88,6 +90,11 @@ ZAP and k6 images and the o2c-app Python environment.
    - syncs prod back to the previous images and checks them.
 
    The build stays failed, and `reports/rollback.txt` names both commits.
+7. **If the SLO check fails but the build merged no PR** (envs/prod already had the test
+   images, e.g. a second `SIMULATE_SLO_BREACH` run), prod was not changed by this build
+   and nothing is rolled back. The build stays failed; the log and `reports/rollback.txt`
+   say "SLO breached; nothing to roll back: this run did not change prod (envs/prod
+   unchanged)".
 
 `make prod-down` scales `o2c-prod` to 0 to free memory. Argo CD then shows prod
 OutOfSync; the next promotion syncs it back.
@@ -99,11 +106,11 @@ Each build archives its reports: open the build, then **Build Artifacts**.
 |---|---|
 | `reports/images-<env>.txt` | the promoted images (service, image by digest, port, health path) |
 | `reports/integration-test.txt` | PASS/FAIL lines of the integration test (test) |
-| `reports/zap-ui.html`, `zap-agent-api.html` (and `.json`) | ZAP baseline reports (test) |
+| `reports/zap-ui.html`, `zap-agent-api.html` (and `.json`), `zap-baseline.conf` | ZAP baseline reports and the rules they used (test) |
 | `reports/k6-test.json`, `k6-prod-slo.json` | k6 summaries: p95, error rate, thresholds |
 | `o2c-app/eval/report.md`, `report.json` | `make eval` report (test) |
 | `reports/change-request.txt`, `approval.txt` | change request; who started and who approved (prod) |
-| `reports/smoke-test.txt`, `rollback.txt` | smoke test (prod); the reverted and the revert commit |
+| `reports/smoke-test.txt`, `rollback.txt` | smoke test (prod); the reverted and the revert commit, or why nothing was rolled back |
 
 The console log shows each stage, with timestamps.
 

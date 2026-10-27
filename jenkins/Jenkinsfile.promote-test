@@ -6,8 +6,8 @@
 //     its checks pass
 //  3. Argo CD sync of the test applications (manual sync policy), wait until healthy
 //  4. gates: integration test (a training PO through the test pipeline), OWASP ZAP
-//     baseline (no high alerts), k6 load test (p95 < 500 ms, errors < 1%), make eval of
-//     o2c-app at the promoted commit
+//     baseline (no high alerts, no alert of a FAIL rule of jenkins/zap-baseline.conf),
+//     k6 load test (p95 < 500 ms, errors < 1%), make eval of o2c-app at the promoted commit
 //  5. always: archive the reports, scale o2c-test to 0 (memory), clean the workspace
 //
 // Helpers: jenkins/lib.sh. Reports: archived artifacts under reports/ and eval/.
