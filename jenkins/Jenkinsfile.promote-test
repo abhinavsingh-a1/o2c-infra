@@ -44,6 +44,10 @@ pipeline {
     KUBECONFIG = credentials('kubeconfig-o2c')
     O2C_ENV_FILE = credentials('o2c-env')
     UV_FROZEN = '1'
+    // uv's managed CPython 3.12 for every uv command: the newest one may lack wheels
+    // (zstandard) and the Jenkins image has no C compiler to build them
+    UV_PYTHON = '3.12'
+    UV_PYTHON_PREFERENCE = 'only-managed'
   }
   stages {
     stage('Checkout') {
@@ -134,10 +138,18 @@ pipeline {
   }
   post {
     always {
-      // Plain sh: runs even when the checkout (and with it jenkins/lib.sh) failed
+      // Plain sh: runs even when the checkout (and with it jenkins/lib.sh) failed.
+      // Nothing to do (and no warning) when o2c-test has no deployments yet.
       sh(label: 'scale o2c-test to 0', script: '''
-        kubectl -n o2c-test scale deployment --all --replicas=0 \
-          || echo "WARNING: could not scale o2c-test to 0" >&2
+        if out=$(kubectl -n o2c-test get deployment -o name 2>&1); then
+          deployments=$(printf '%s\\n' "$out" | grep '^deployment' || true)
+          if [ -n "$deployments" ]; then
+            kubectl -n o2c-test scale $deployments --replicas=0 \
+              || echo "WARNING: could not scale o2c-test to 0" >&2
+          fi
+        else
+          echo "WARNING: could not list the deployments of o2c-test: $out" >&2
+        fi
       ''')
     }
     cleanup {
