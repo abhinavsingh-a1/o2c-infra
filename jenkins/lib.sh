@@ -240,25 +240,89 @@ revert_pr() {
 
 # --- Argo CD and Kubernetes -----------------------------------------------------------
 
+# Pauses between the attempts of retry_transient (attempts: one more than pauses)
+RETRY_PAUSES=(20 40 60)
+
+# transient_error <output>: whether a failed argocd/kubectl call failed on a transient
+# network error (kind on Docker Desktop: cluster DNS or the port-forward drops for a
+# moment), worth retrying. A real error (sync failed, degraded health, invalid manifest,
+# the CLI's own timeout) is never transient, even with a network error in its message.
+# Tested by jenkins/tests/transient_error.sh.
+transient_error() {
+  local out="${1,,}"
+  local real='phase: (failed|error)|sync ?failed|degraded|comparisonerror|invalidspecerror|is invalid|error validating|timed out \([0-9]+s\)'
+  local transient='code = unavailable|dns: |lookup error|lookup [^ ]+ on [^ ]+: |i/o timeout|connection reset|connection refused|context deadline exceeded'
+  [[ "$out" =~ $real ]] && return 1
+  [[ "$out" =~ $transient ]]
+}
+
+# retry_transient <label> <command...>: runs the command; on a transient error (see
+# transient_error) retries it after each pause of RETRY_PAUSES, on any other error fails
+# at once. Passes its stdout through; RETRY_ATTEMPT is the attempt number (1, 2, ...).
+retry_transient() {
+  local label="$1" attempts=$((${#RETRY_PAUSES[@]} + 1)) RETRY_ATTEMPT=1 status out err
+  shift
+  out=$(mktemp) err=$(mktemp)
+  while :; do
+    status=0
+    "$@" > "$out" 2> "$err" || status=$?
+    cat "$err" >&2
+    if [ "$status" -eq 0 ]; then
+      cat "$out"
+      break
+    fi
+    if ! transient_error "$(cat "$out" "$err")"; then
+      cat "$out"
+      break
+    fi
+    if [ "$RETRY_ATTEMPT" -ge "$attempts" ]; then
+      log "$label: transient error, giving up after $attempts attempts"
+      break
+    fi
+    log "$label: transient error, retry $RETRY_ATTEMPT/$attempts in ${RETRY_PAUSES[RETRY_ATTEMPT - 1]} s"
+    sleep "${RETRY_PAUSES[RETRY_ATTEMPT - 1]}"
+    RETRY_ATTEMPT=$((RETRY_ATTEMPT + 1))
+  done
+  rm -f "$out" "$err"
+  return "$status"
+}
+argocd_retry() { retry_transient argocd argocd "$@"; }
+kubectl_retry() { retry_transient kubectl kubectl "$@"; }
+
+# app_sync <argocd app sync args...>: after a transient error the sync of the previous
+# attempt can still be running; then the following wait waits for it
+app_sync() {
+  local err status=0
+  err=$(argocd app sync "$@" 2>&1 > /dev/null) || status=$?
+  if [ "$status" -ne 0 ] && [ "${RETRY_ATTEMPT:-1}" -gt 1 ] \
+    && [[ "$err" == *"another operation is already in progress"* ]]; then
+    log "argocd: the sync started by the previous attempt is still running"
+    return 0
+  fi
+  [ -z "$err" ] || printf '%s\n' "$err" >&2
+  return "$status"
+}
+
 # argocd CLI through a port-forward to argocd-server (kubeconfig), session in the workspace
 argocd_login() {
   export ARGOCD_OPTS="--port-forward --port-forward-namespace argocd --plaintext --config $WORKSPACE/.argocd/config"
   local password
-  password=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)
-  argocd login --username admin --password "$password" > /dev/null
+  password=$(kubectl_retry -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)
+  argocd_retry login --username admin --password "$password" > /dev/null
 }
 
 # sync_env <env>: refresh, sync and wait for every Application of the environment
+# (each argocd call retried on transient errors)
 sync_env() {
   local selector="o2c.io/environment=$1" apps app
-  mapfile -t apps < <(argocd app list -l "$selector" -o name)
+  mapfile -t apps < <(argocd_retry app list -l "$selector" -o name)
   [ "${#apps[@]}" -gt 0 ] || fail "no Argo CD applications with $selector" || return 1
   for app in "${apps[@]}"; do
-    argocd app get "$app" --hard-refresh > /dev/null
+    argocd_retry app get "$app" --hard-refresh > /dev/null
   done
-  argocd app sync -l "$selector" --prune --timeout 900 > /dev/null
-  argocd app wait -l "$selector" --sync --health --timeout 900 > /dev/null
-  argocd app list -l "$selector"
+  retry_transient argocd app_sync -l "$selector" --prune --timeout 900
+  argocd_retry app wait -l "$selector" --sync --health --timeout 900 > /dev/null
+  argocd_retry app list -l "$selector"
 }
 
 # assert_images <env> <images file>: every Deployment runs the image of the values file
@@ -266,7 +330,7 @@ assert_images() {
   local service image rest running
   while read -r service image rest; do
     [ -n "$service" ] || continue
-    running=$(kubectl -n "o2c-$1" get deployment "$service" -o jsonpath='{.spec.template.spec.containers[0].image}')
+    running=$(kubectl_retry -n "o2c-$1" get deployment "$service" -o jsonpath='{.spec.template.spec.containers[0].image}')
     [ "$running" = "$image" ] || fail "o2c-$1/$service runs $running, expected $image" || return 1
     log "o2c-$1/$service runs $image"
   done < "$2"
