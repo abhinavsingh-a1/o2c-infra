@@ -367,16 +367,20 @@ smoke_test() {
 
 workspace_in_volume() { echo "${WORKSPACE#"$JENKINS_HOME"/}${1:+/$1}"; }
 
-# zap_baseline <name> <url>: passive baseline scan; fails on any high-risk alert
+# zap_baseline <name> <url>: passive baseline scan with the rules of jenkins/zap-baseline.conf;
+# fails on an alert of a FAIL rule (security headers) and on any high-risk alert
 zap_baseline() {
   local name="$1" url="$2" status=0 high
+  # ZAP reads the config from /zap/wrk; it is archived with the reports
+  cp "$WORKSPACE/jenkins/zap-baseline.conf" "$REPORTS/zap-baseline.conf"
   docker run --rm --network "container:$JENKINS_CONTAINER" \
     --mount "type=volume,src=$JENKINS_HOME_VOLUME,dst=/zap/wrk,volume-subpath=$(workspace_in_volume reports)" \
-    "$ZAP_IMAGE" zap-baseline.py -t "$url" -P 8090 -m 2 -I -s \
+    "$ZAP_IMAGE" zap-baseline.py -t "$url" -P 8090 -m 2 -I -s -c zap-baseline.conf \
     -r "zap-$name.html" -J "zap-$name.json" || status=$?
-  # -I: warnings do not fail the scan; 3 and more mean ZAP itself failed
+  # 1: an alert of a FAIL rule; -I: warnings do not fail the scan; 3 and more mean ZAP itself failed
   [ "$status" -lt 3 ] || fail "ZAP could not scan $url (exit $status)" || return 1
   jq -r '.site[].alerts[] | "\(.riskdesc)\t\(.alert) (\(.count) URLs)"' "$REPORTS/zap-$name.json" | sort -u >&2
+  [ "$status" -ne 1 ] || fail "ZAP: alert(s) of FAIL rules (jenkins/zap-baseline.conf) on $url (reports/zap-$name.html)" || return 1
   high=$(jq '[.site[].alerts[] | select(.riskcode == "3")] | length' "$REPORTS/zap-$name.json")
   [ "$high" -eq 0 ] || fail "ZAP found $high high-risk alert(s) on $url (reports/zap-$name.html)"
 }

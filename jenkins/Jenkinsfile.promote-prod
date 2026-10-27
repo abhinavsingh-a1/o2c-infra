@@ -11,7 +11,9 @@
 //  5. smoke test (healthPath of every service) and SLO check (short k6 run: p95 < 800 ms,
 //     errors < 1%); SIMULATE_SLO_BREACH=true makes the SLO check fail on purpose
 //  6. rollback rule: when anything fails after the prod PR was merged, a revert PR is
-//     opened and merged and prod is synced back to the previous images
+//     opened and merged and prod is synced back to the previous images; when the SLO check
+//     fails but this build merged no PR (envs/prod already had the test images), there is
+//     nothing to roll back: reports/rollback.txt says so and the build stays failed
 //
 // Helpers: jenkins/lib.sh. Reports: archived artifacts under reports/.
 
@@ -144,6 +146,8 @@ pipeline {
     }
     stage('SLO check') {
       steps {
+        // Still 'running' in post when the check failed (or was aborted)
+        script { env.SLO_CHECK = 'running' }
         bash('k6: 10 VUs, 20 s, p95 < 800 ms, errors < 1%', '''
           trap stop_port_forwards EXIT
           p95=800
@@ -155,6 +159,7 @@ pipeline {
           port_forward o2c-prod ui 18080 80
           k6_run prod-slo 10 20s "$p95" http://127.0.0.1:18200/health http://127.0.0.1:18080/
         ''')
+        script { env.SLO_CHECK = 'passed' }
       }
     }
   }
@@ -176,7 +181,13 @@ pipeline {
           writeFile(file: 'reports/rollback.txt',
                     text: "reverted o2c-gitops ${env.PROD_MERGE} with ${env.ROLLBACK_MERGE}\n")
           echo("Rolled back: prod runs the images of o2c-gitops ${env.ROLLBACK_MERGE}")
+        } else if (env.SLO_CHECK == 'running') {
+          // envs/prod was already at the test images: prod ran them before this build
+          def msg = 'SLO breached; nothing to roll back: this run did not change prod (envs/prod unchanged)'
+          echo(msg)
+          writeFile(file: 'reports/rollback.txt', text: "${msg}\n")
         }
+        // the build stays FAILED either way
       }
     }
     cleanup {
