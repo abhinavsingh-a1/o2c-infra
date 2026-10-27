@@ -1,6 +1,7 @@
 // Promote the release running in test to prod (o2c-app ADR-018).
 //
-//  1. the test images: signature and build provenance verified, one o2c-app commit
+//  1. the test images: signature and build provenance verified, the newest o2c-app commit
+//     they all have a provenance for
 //  2. change request: ServiceNow when SERVICENOW_URL is set (credential servicenow),
 //     otherwise recorded as "SKIPPED (E13 pending)"
 //  3. four-eyes approval: an input step that must be answered by a user other than the
@@ -49,6 +50,10 @@ pipeline {
     GH_TOKEN = credentials('github-token')
     KUBECONFIG = credentials('kubeconfig-o2c')
     UV_FROZEN = '1'
+    // uv's managed CPython 3.12 for every uv command: the newest one may lack wheels
+    // (zstandard) and the Jenkins image has no C compiler to build them
+    UV_PYTHON = '3.12'
+    UV_PYTHON_PREFERENCE = 'only-managed'
   }
   stages {
     stage('Checkout') {

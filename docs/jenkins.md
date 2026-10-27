@@ -51,7 +51,8 @@ Configuration made in the UI is lost on the next start: change
 ## promote-to-test
 Start **promote-to-test** with **Build Now**. The pipeline:
 1. verifies the dev images (signature and provenance of o2c-app's release on main) and
-   finds their o2c-app commit;
+   finds their o2c-app commit: the newest one that every image has a build provenance
+   for (an image unchanged across releases has one per release);
 2. opens a PR in o2c-gitops setting `envs/test` to those images with 1 replica, and
    merges it when its checks pass;
 3. syncs the test applications in Argo CD and waits until they are healthy;
@@ -116,9 +117,10 @@ docker exec o2c-jenkins sh -c 'tail -n 50 /var/jenkins_home/audit-trail.log.*[0-
 - **`make jenkins-up` fails at "Log in as abhinav":**
   - run `docker logs o2c-jenkins` and look for JCasC errors;
   - check that the three `JENKINS_*` keys are set in `.env`.
-- **"no valid signature" or "different o2c-app commits":** dev or test is not running
-  one complete release. Wait for the release's gitops PR to merge, or check the images
-  with `scripts/verify_image.sh` in o2c-app.
+- **"no valid signature" or "no o2c-app commit in common":** dev or test is not running
+  one complete release (the error lists the commits of each image). Wait for the
+  release's gitops PR to merge, or check the images with `scripts/verify_image.sh` in
+  o2c-app.
 - **"has no scripts/promote_values.py":** the release predates ADR-018. Release o2c-app
   main again, then promote.
 - **The integration test times out:** check that the test pods are running and that the

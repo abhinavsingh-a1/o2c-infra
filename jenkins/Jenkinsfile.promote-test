@@ -1,7 +1,7 @@
 // Promote the release running in dev to test (o2c-app ADR-018).
 //
 //  1. the dev images: cosign signature and build provenance of o2c-app's release workflow
-//     on main, all from one o2c-app commit (the promoted commit)
+//     on main; the promoted commit is the newest o2c-app commit they all have a provenance for
 //  2. a PR in o2c-gitops setting envs/test to the dev images with 1 replica, merged once
 //     its checks pass
 //  3. Argo CD sync of the test applications (manual sync policy), wait until healthy
@@ -44,6 +44,10 @@ pipeline {
     KUBECONFIG = credentials('kubeconfig-o2c')
     O2C_ENV_FILE = credentials('o2c-env')
     UV_FROZEN = '1'
+    // uv's managed CPython 3.12 for every uv command: the newest one may lack wheels
+    // (zstandard) and the Jenkins image has no C compiler to build them
+    UV_PYTHON = '3.12'
+    UV_PYTHON_PREFERENCE = 'only-managed'
   }
   stages {
     stage('Checkout') {
@@ -134,10 +138,18 @@ pipeline {
   }
   post {
     always {
-      // Plain sh: runs even when the checkout (and with it jenkins/lib.sh) failed
+      // Plain sh: runs even when the checkout (and with it jenkins/lib.sh) failed.
+      // Nothing to do (and no warning) when o2c-test has no deployments yet.
       sh(label: 'scale o2c-test to 0', script: '''
-        kubectl -n o2c-test scale deployment --all --replicas=0 \
-          || echo "WARNING: could not scale o2c-test to 0" >&2
+        if out=$(kubectl -n o2c-test get deployment -o name 2>&1); then
+          deployments=$(printf '%s\\n' "$out" | grep '^deployment' || true)
+          if [ -n "$deployments" ]; then
+            kubectl -n o2c-test scale $deployments --replicas=0 \
+              || echo "WARNING: could not scale o2c-test to 0" >&2
+          fi
+        else
+          echo "WARNING: could not list the deployments of o2c-test: $out" >&2
+        fi
       ''')
     }
     cleanup {
