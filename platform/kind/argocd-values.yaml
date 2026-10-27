@@ -1,5 +1,12 @@
 # Argo CD on the local kind cluster (o2c-app ADR-017). Reached only through
 # argocd-ui.sh (port-forward), so no ingress; no SSO (dex) and no notifications.
+global:
+  # No NetworkPolicies (chart default: one per component). kindnet enforces policies in
+  # userspace (nfqueue): every DNS query of a selected pod waits for kindnet's verdict, and
+  # kindnet loses verdicts, so Argo CD's lookups timed out for minutes (platform/README.md).
+  # Local single-node cluster only: any pod may reach the Argo CD components.
+  networkPolicy:
+    create: false
 dex:
   enabled: false
 notifications:

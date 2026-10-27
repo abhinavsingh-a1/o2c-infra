@@ -3,8 +3,9 @@
 # run it again after a change; helm upgrade --install and kubectl apply converge.
 #
 #   1. Kyverno (pinned chart) - admission policies, synced later from o2c-gitops
-#   2. Argo CD (pinned chart)
-#   3. the root Application from o2c-gitops (app of apps): namespaces, policies and
+#   2. Argo CD (pinned chart), without NetworkPolicies
+#   3. kindnet: restarted if packets wait in its NetworkPolicy queue (stale verdicts)
+#   4. the root Application from o2c-gitops (app of apps): namespaces, policies and
 #      one Application per service and environment
 #
 # Credentials are not in Git: run secrets.sh <namespace> for o2c-dev (and test/prod).
@@ -27,6 +28,23 @@ echo "== Argo CD $ARGOCD_CHART_VERSION"
 h upgrade --install argocd "$ARGOCD_CHART" \
   --version "$ARGOCD_CHART_VERSION" --namespace argocd --create-namespace \
   --values "$HERE/argocd-values.yaml" --wait --timeout 10m
+
+# kindnet enforces NetworkPolicies in userspace (nfqueue 101): DNS queries and new
+# connections of pods selected by a policy wait for its verdict, and it loses verdicts.
+# Packets without a verdict stay queued until kindnet restarts; when the queue is full,
+# those pods lose DNS for minutes (platform/README.md). No policies, then an empty queue.
+echo "== kindnet policy queue"
+if policies="$(k get networkpolicy --all-namespaces --no-headers 2> /dev/null)" && [ -n "$policies" ]; then
+  echo "warning: these NetworkPolicies send their pods' DNS through kindnet's queue:" >&2
+  echo "$policies" >&2
+fi
+pending="$(docker exec "$CLUSTER-control-plane" awk '{n += $3} END {print n + 0}' \
+  /proc/net/netfilter/nfnetlink_queue 2> /dev/null || echo 0)"
+if [ "$pending" -gt 0 ]; then
+  echo "$pending packets without a verdict: restarting kindnet"
+  k -n kube-system rollout restart daemonset/kindnet
+  k -n kube-system rollout status daemonset/kindnet --timeout 2m
+fi
 
 echo "== root Application (o2c-gitops)"
 k apply --namespace argocd -f "$ROOT_APP"
