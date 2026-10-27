@@ -123,6 +123,12 @@ docker exec o2c-jenkins sh -c 'tail -n 50 /var/jenkins_home/audit-trail.log.*[0-
   o2c-app.
 - **"has no scripts/promote_values.py":** the release predates ADR-018. Release o2c-app
   main again, then promote.
+- **Argo CD steps fail with `lookup ... on 10.96.0.10:53: i/o timeout` for minutes**
+  (for `github.com` and for `argocd-repo-server` alike) and the retries do not help:
+  kindnet, kind's CNI, loses the DNS queries of pods that a NetworkPolicy selects. The
+  Argo CD chart used to create such policies. `platform/kind/bootstrap.sh` now installs
+  Argo CD without them and restarts kindnet if packets are stuck in its queue: run it
+  again, then retry the build. Cause, evidence and checks: `platform/README.md`.
 - **The integration test times out:** check that the test pods are running and that the
   topics exist (`make topics ENV=test` in o2c-app). Then read the agent's log:
   `kubectl -n o2c-test logs deploy/agent` (the build scales test to 0 afterwards, so
